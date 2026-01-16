@@ -28,13 +28,12 @@ def upload_pdf():
             text = "\n".join(page.extract_text() or "" for page in pdf.pages)
 
         data = {
-            "permit_number": find(r"(UE-[A-Z]-\d{5}/\d{4})", text),  # Engedélyszám
-            "issue_date": find(r"(\d{4}\.\d{2}\.\d{2})", text),  # Dátum (pl. 2026.01.12)
-            "license_plate": find(r"Rendsz[aá]m\s*[:\-]?\s*([A-Z0-9\-]+)", text),  # Rendszám
-            "from_place": find(r"Kiindul[aá]s\s*[:\-]?\s*(.+)", text),  # Indulás
-            "to_place": find(r"C[eé]l\s*[:\-]?\s*(.+)", text),  # Cél
-            "vehicle_type": find(r"J[aá]rm[uű]\s*t[ií]pus\s*[:\-]?\s*(.+)", text),  # Jármű típus
-            "weight": find(r"Tengelysz[aá]m/[\w ]*?:?\s*(\d+\.?\d*)", text),  # Tengelyszám / Súly
+            "permit_number": find(r"(UE-[A-Z]-\d{5}/\d{4})", text),
+            "issue_date": find(r"(\d{4}\.\d{2}\.\d{2})", text),
+            "license_plate": find(r"Rendsz[aá]m\s*[:\-]?\s*([A-Z0-9\-]+)", text),
+            "from_place": find(r"Kiindul[aá]s\s*[:\-]?\s*(.+)", text),
+            "to_place": find(r"C[eé]l\s*[:\-]?\s*(.+)", text),
+            "vehicle_type": find(r"J[aá]rm[uű]\s*t[ií]pus\s*[:\-]?\s*(.+)", text),
             "raw_text": text[:4000]
         }
 
@@ -45,5 +44,5 @@ def upload_pdf():
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 8000))
     app.run(host="0.0.0.0", port=port)
