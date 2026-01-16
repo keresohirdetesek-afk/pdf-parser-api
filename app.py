@@ -8,6 +8,10 @@ import os
 app = Flask(__name__)
 CORS(app)
 
+def find(pattern, text):
+    m = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
+    return m.group(1).strip() if m else None
+
 @app.route("/", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
@@ -15,62 +19,25 @@ def health():
 @app.route("/upload", methods=["POST"])
 def upload_pdf():
     if "file" not in request.files:
-        return jsonify({"error": "Nincs fájl feltöltve."}), 400
+        return jsonify({"error": "Nincs fájl feltöltve"}), 400
 
     file = request.files["file"]
 
     try:
         with pdfplumber.open(io.BytesIO(file.read())) as pdf:
-            text = ""
-            for page in pdf.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text + "\n"
+            text = "\n".join(page.extract_text() or "" for page in pdf.pages)
 
-        # ===== REGEXEK =====
+        data = {
+            "permit_number": find(r"(UE-[A-Z]-\d{5}/\d{4})", text),
+            "issue_date": find(r"(\d{4}\.\d{2}\.\d{2})", text),
+            "license_plate": find(r"Rendsz[aá]m\s*[:\-]?\s*([A-Z0-9\-]+)", text),
+            "from_place": find(r"Kiindul[aá]s\s*[:\-]?\s*(.+)", text),
+            "to_place": find(r"C[eé]l\s*[:\-]?\s*(.+)", text),
+            "vehicle_type": find(r"J[aá]rm[uű]\s*t[ií]pus\s*[:\-]?\s*(.+)", text),
+            "raw_text": text[:4000]
+        }
 
-        permit_number = re.search(r"(UE-\d+/\d{4})", text)
-
-        from_place = re.search(
-            r"Kiindul[aá]s.*?:\s*(.+)",
-            text,
-            re.IGNORECASE
-        )
-
-        to_place = re.search(
-            r"C[ée]l.*?:\s*(.+)",
-            text,
-            re.IGNORECASE
-        )
-
-        license_plate = re.search(
-            r"Rendsz[aá]m.*?:\s*([A-Z0-9\- ]+)",
-            text,
-            re.IGNORECASE
-        )
-
-        vehicle_type = re.search(
-            r"J[aá]rm[űu]fajta.*?:\s*(.+)",
-            text,
-            re.IGNORECASE
-        )
-
-        issue_date = re.search(
-            r"KIADVA.*?:\s*(\d{4}\.\s*\d{2}\.\s*\d{2})",
-            text
-        )
-
-        # ===== VÁLASZ =====
-
-        return jsonify({
-            "permit_number": permit_number.group(1).strip() if permit_number else None,
-            "from_place": from_place.group(1).strip() if from_place else None,
-            "to_place": to_place.group(1).strip() if to_place else None,
-            "license_plate": license_plate.group(1).strip() if license_plate else None,
-            "vehicle_type": vehicle_type.group(1).strip() if vehicle_type else None,
-            "issue_date": issue_date.group(1).strip() if issue_date else None,
-            "raw_text_preview": text[:2000]
-        })
+        return jsonify(data)
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
