@@ -1,3 +1,6 @@
 Flask
 flask-cors
 pdfplumber
+sqlalchemy
+psycopg2-binary
+pymysql
