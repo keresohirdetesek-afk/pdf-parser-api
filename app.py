@@ -8,8 +8,8 @@ import os
 app = Flask(__name__)
 CORS(app)
 
-def find(pattern, text):
-    m = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
+def find(pattern, text, flags=re.IGNORECASE):
+    m = re.search(pattern, text, flags)
     return m.group(1).strip() if m else None
 
 @app.route("/", methods=["GET"])
@@ -27,33 +27,45 @@ def upload_pdf():
         with pdfplumber.open(io.BytesIO(file.read())) as pdf:
             text = "\n".join(page.extract_text() or "" for page in pdf.pages)
 
-        data = {
-            # ENGEDÉLYSZÁM pl. UE-921/2026 vagy UE-A-12345/2024
-            "permit_number": find(r"(UE-[A-Z\-]*\d+/\d{4})", text),
+        # ===== ENGEDÉLYSZÁM =====
+        permit_number = find(r"(UE-[A-Z]-\d+/\d{4})", text)
 
-            # DÁTUM pl. 2026.01.12
-            "issue_date": find(r"(\d{4}\.\d{2}\.\d{2})", text),
+        # ===== KIADÁS DÁTUMA =====
+        issue_date = find(r"(\d{4}\.\s?\d{2}\.\s?\d{2})", text)
 
-            # RENDSZÁM pl. NB548H / ABC-123
-            "license_plate": find(r"Rendsz[aá]m\s*[:\-]?\s*([A-Z0-9\- ]+)", text),
+        # ===== RENDSZÁMOK =====
+        plates = re.findall(r"\n([A-Z]{2,3}\d{3}\s?[A-Z])\b", text)
+        license_plate = ", ".join(plates) if plates else None
 
-            # INDULÁS
-            "from_place": find(r"Kiindul[aá]s\s*[:\-]?\s*(.+)", text),
+        # ===== KIINDULÁS (KÖVETKEZŐ SOR!) =====
+        from_place = find(
+            r"10\.\s*Kiindulás.*?\n([A-ZÁÉÍÓÖŐÚÜŰa-z0-9 ,\-]+)",
+            text
+        )
 
-            # CÉL
-            "to_place": find(r"C[eé]l\s*[:\-]?\s*(.+)", text),
+        # ===== CÉLÁLLOMÁS =====
+        to_place = find(
+            r"12\.\s*Célállomás.*?\n([A-ZÁÉÍÓÖŐÚÜŰa-z0-9 ,\-]+)",
+            text
+        )
 
-            # TENGELYSZÁM pl. 3 tengelyes / 5 tengely
-            "axle_count": find(r"(\d+)\s*tengely", text),
+        # ===== TENGELYSZÁM =====
+        axle_counts = re.findall(r"nyerges vontató\s+(\d)|félpótkocsi\s+(\d)", text)
+        axle_count = sum(int(a or b) for a, b in axle_counts) if axle_counts else None
 
-            # SÚLY pl. 25900 kg / 25,9 t
-            "weight": find(r"(\d{2,5}[.,]?\d*)\s*(kg|t)", text),
+        # ===== ÖSSZTÖMEG =====
+        weight = find(r"Raktömeg\s*\[t\]\s*([\d,]+)", text)
 
-            # ellenőrzéshez
+        return jsonify({
+            "permit_number": permit_number,
+            "issue_date": issue_date,
+            "license_plate": license_plate,
+            "from_place": from_place,
+            "to_place": to_place,
+            "axle_count": axle_count,
+            "weight": weight,
             "raw_text_preview": text[:2000]
-        }
-
-        return jsonify(data)
+        })
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
