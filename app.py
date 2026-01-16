@@ -5,13 +5,42 @@ import io
 import re
 import os
 
+from sqlalchemy import create_engine, Column, Integer, String, JSON
+from sqlalchemy.orm import declarative_base, sessionmaker
+
+# ======================
+# APP INIT
+# ======================
 app = Flask(__name__)
 CORS(app)
 
-def find(pattern, text, flags=re.IGNORECASE):
+# ======================
+# DATABASE
+# ======================
+DATABASE_URL = os.environ.get("DATABASE_URL")
+engine = create_engine(DATABASE_URL) if DATABASE_URL else None
+Session = sessionmaker(bind=engine) if engine else None
+Base = declarative_base()
+
+class Permit(Base):
+    __tablename__ = "permits"
+    id = Column(Integer, primary_key=True)
+    permit_number = Column(String)
+    data = Column(JSON)
+
+if engine:
+    Base.metadata.create_all(engine)
+
+# ======================
+# HELPERS
+# ======================
+def find(pattern, text, flags=re.IGNORECASE | re.MULTILINE):
     m = re.search(pattern, text, flags)
     return m.group(1).strip() if m else None
 
+# ======================
+# ROUTES
+# ======================
 @app.route("/", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
@@ -21,51 +50,97 @@ def upload_pdf():
     if "file" not in request.files:
         return jsonify({"error": "Nincs fájl feltöltve"}), 400
 
-    file = request.files["file"]
-
     try:
-        with pdfplumber.open(io.BytesIO(file.read())) as pdf:
+        with pdfplumber.open(io.BytesIO(request.files["file"].read())) as pdf:
             text = "\n".join(page.extract_text() or "" for page in pdf.pages)
 
-        # ===== ENGEDÉLYSZÁM =====
+        # ======================
+        # BASIC FIELDS
+        # ======================
         permit_number = find(r"(UE-[A-Z]-\d+/\d{4})", text)
-
-        # ===== KIADÁS DÁTUMA =====
         issue_date = find(r"(\d{4}\.\s?\d{2}\.\s?\d{2})", text)
 
-        # ===== RENDSZÁMOK =====
+        from_place = find(
+            r"10\.\s*Kiindulás.*?\n([A-ZÁÉÍÓÖŐÚÜŰa-z0-9 ,\-]+)", text
+        )
+        to_place = find(
+            r"12\.\s*Célállomás.*?\n([A-ZÁÉÍÓÖŐÚÜŰa-z0-9 ,\-]+)", text
+        )
+
         plates = re.findall(r"\n([A-Z]{2,3}\d{3}\s?[A-Z])\b", text)
         license_plate = ", ".join(plates) if plates else None
 
-        # ===== KIINDULÁS (KÖVETKEZŐ SOR!) =====
-        from_place = find(
-            r"10\.\s*Kiindulás.*?\n([A-ZÁÉÍÓÖŐÚÜŰa-z0-9 ,\-]+)",
-            text
+        # ======================
+        # AXLES
+        # ======================
+        axles = []
+        axle_lines = re.findall(
+            r"\n(\d)\s+([AVE])\s+(?:X\s+)?([\d,]+)", text
         )
 
-        # ===== CÉLÁLLOMÁS =====
-        to_place = find(
-            r"12\.\s*Célállomás.*?\n([A-ZÁÉÍÓÖŐÚÜŰa-z0-9 ,\-]+)",
-            text
+        for idx, typ, load in axle_lines:
+            axles.append({
+                "index": int(idx),
+                "type": typ,
+                "load_t": load
+            })
+
+        # ======================
+        # AXLE GROUPS (VV, EE)
+        # ======================
+        axle_groups = []
+        group_lines = re.findall(
+            r"\n(VV|EE)\s+([\d,]+)\s+([\d,]+)", text
         )
 
-        # ===== TENGELYSZÁM =====
-        axle_counts = re.findall(r"nyerges vontató\s+(\d)|félpótkocsi\s+(\d)", text)
-        axle_count = sum(int(a or b) for a, b in axle_counts) if axle_counts else None
+        for group, requested, allowed in group_lines:
+            axle_groups.append({
+                "group": group,
+                "requested_t": requested,
+                "allowed_t": allowed
+            })
 
-        # ===== ÖSSZTÖMEG =====
-        weight = find(r"Raktömeg\s*\[t\]\s*([\d,]+)", text)
+        # ======================
+        # ROUTES + KM
+        # ======================
+        routes = sorted(set(re.findall(r"\bM\d+\b", text)))
 
-        return jsonify({
+        km_sections = re.findall(
+            r"(M\d+)\s*km\s*(\d+\+\d+)", text
+        )
+
+        km_data = [
+            {"road": road, "km": km}
+            for road, km in km_sections
+        ]
+
+        # ======================
+        # FINAL DATA
+        # ======================
+        result = {
             "permit_number": permit_number,
             "issue_date": issue_date,
-            "license_plate": license_plate,
             "from_place": from_place,
             "to_place": to_place,
-            "axle_count": axle_count,
-            "weight": weight,
-            "raw_text_preview": text[:2000]
-        })
+            "license_plate": license_plate,
+            "axles": axles,
+            "axle_groups": axle_groups,
+            "routes": routes,
+            "km_sections": km_data
+        }
+
+        # ======================
+        # SAVE TO DB
+        # ======================
+        if Session:
+            session = Session()
+            session.add(Permit(
+                permit_number=permit_number,
+                data=result
+            ))
+            session.commit()
+
+        return jsonify(result)
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
