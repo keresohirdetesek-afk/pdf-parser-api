@@ -5,134 +5,90 @@ import io
 import re
 import os
 
-app = Flask(name)
+app = Flask(__name__)
 CORS(app)
 
-def find(pattern, text, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL):
-    m = re.search(pattern, text, flags)
-    return m.group(1).strip() if m else None
+
+def clean(text):
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def find_after(label_regex, text):
+    """
+    Megkeresi a címkét, és a KÖVETKEZŐ sort adja vissza
+    """
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if re.search(label_regex, line, re.IGNORECASE):
+            if i + 1 < len(lines):
+                return clean(lines[i + 1])
+    return None
+
 
 @app.route("/", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
+
 
 @app.route("/upload", methods=["POST"])
 def upload_pdf():
     if "file" not in request.files:
         return jsonify({"error": "Nincs fájl feltöltve"}), 400
 
-    f = request.files["file"]
+    file = request.files["file"]
 
     try:
-        with pdfplumber.open(io.BytesIO(f.read())) as pdf:
-            text = "\n".join((page.extract_text() or "") for page in pdf.pages)
+        with pdfplumber.open(io.BytesIO(file.read())) as pdf:
+            text = "\n".join(page.extract_text() or "" for page in pdf.pages)
 
-        # =========================
-        # 1) ALAP MEZŐK
-        # =========================
-        permit_number = find(r"(UE-[A-Z]-\d+/\d{4}|UE-\d+/\d{4})", text)
-        issue_date = find(r"(\d{4}\.\d{2}\.\d{2})", text)
+        # ===== ALAP ADATOK =====
 
-        # =========================
-        # 2) KIINDULÁS + CÉL
-        # (ez a PDF layout miatt: dátum + idő a sor elején, helynév a sor végén)
-        # =========================
-        from_place = find(
-            r"10\.\s*Kiindulás.?\n\s\d{4}\.\s*\d{2}\.\s*\d{2}\.\s*\d{1,2}:\d{2}\s+(.+)",
-            text
-        )
-        to_place = find(
-            r"12\.\s*Célállomás.?\n\s\d{4}\.\s*\d{2}\.\s*\d{2}\.\s*\d{1,2}:\d{2}\s+(.+)",
-            text
-        )
+        permit_number = re.search(r"(UE-[A-Z]-\d+/\d{4})", text)
+        issue_date = re.search(r"(\d{4}\.\s*\d{2}\.\s*\d{2})", text)
 
-        # =========================
-        # 3) RENDSZÁMOK (HU/RO/vegyes)
-        # A te mintáid: "PBB404 H", "WBD548 H", "BN11RTM RO", "BN15NOU RO"
-        # =========================
-        plates = re.findall(r"\b([A-Z]{2,3}\d{3}\s?[A-Z]|\b[A-Z]{2}\d{2}[A-Z]{3}\s?RO)\b", text)
-        # A fenti két minta:
-        # - HU jelleg: PBB404 H / WBD548 H (3 betű + 3 szám + betű)
-        # - RO jelleg: BN11RTM RO (2 betű + 2 szám + 3 betű + RO)
-        # (ha később más ország is kell, bővítjük)
-        plates = [p.strip() for p in plates]
-        license_plate = ", ".join(dict.fromkeys(plates)) if plates else None  # de-dup, sorrend marad
+        from_place = find_after(r"10\.\s*Kiindulás", text)
+        to_place = find_after(r"12\.\s*Célállomás", text)
 
-        # =========================
-        # 4) TENGELYSZÁM (a "Járművek" sorokból)
-        # nyerges vontató 3
-        # félpótkocsi 5
-        # => összesen 8
-        # =========================
-        axle_nums = re.findall(r"\b(nyerges\s+vontató|félpótkocsi)\s+(\d)\b", text, flags=re.IGNORECASE)
-        axle_count = sum(int(n) for _, n in axle_nums) if axle_nums else None
+        # ===== RENDSZÁMOK =====
+        plates = re.findall(r"\b[A-Z]{3}\d{3}\s?[A-Z]\b", text)
+        license_plate = ", ".join(sorted(set(plates))) if plates else None
 
-        # =========================
-        # 5) RAKTÖMEG / SÚLY [t]
-        # "21. Raktömeg [t]" után jellemzően a következő sorban van a szám
-        # =========================
-        weight = find(r"21\.\s*Raktömeg\s*\[t\].?\n.?([0-9]+,[0-9]+)", text)
+        # ===== TENGELYADATOK =====
+        axle_rows = []
+        axle_group_totals = {}
 
-        # =========================
-        # 6) TENGELYTERHELÉSEK (1..N sorok)
-        # példád:
-        # 1 A 8,000 ...
-        # 2 V 2,780 ...
-        # 3 V X 1,320 ...
-        # 4 E 8,400 ...
-        # 5 E 1,410 ...
-        # =========================
-        axles = []
-        axle_lines = re.findall(r"\n(\d+)\s+([A-Z]{1,2})\s+(X\s+)?([0-9]+,[0-9]+)", text)
-        for idx, typ, driven, load in axle_lines:
-            # tipikus tengelybetűk: A, V, E (de hagyjuk általánosra)
-            # load = első szám a sorban (igényelt/korrigált érték)
-            axles.append({
-                "index": int(idx),
-                "type": typ.strip(),
-                "driven": True if driven else False,
-                "requested_t": load
-            })
+        axle_section = False
+        for line in text.splitlines():
+            if "25. Tengelyadatok" in line:
+                axle_section = True
+                continue
 
-        # =========================
-        # 7) TENGELYCSOPORTOK (VV, EE)
-        # példád:
-        # VV 19,000 19,000 19,000
-        # EE 20,000 19,000 1,000 ...
-        # A legstabilabb: első 3 számot vesszük
-        # =========================
-        axle_groups = []
-        for g, a, b, c in re.findall(r"\n(VV|EE)\s+([0-9]+,[0-9]+)\s+([0-9]+,[0-9]+)\s+([0-9]+,[0-9]+)", text):
-            axle_groups.append({
-                "group": g,
-                "v1_t": a,
-                "v2_t": b,
-                "v3_t": c
-            })
+            if axle_section:
+                if re.match(r"\d+\s+[AVE]", line):
+                    parts = clean(line).split(" ")
+                    axle_rows.append({
+                        "axle_no": parts[0],
+                        "type": parts[1],
+                        "requested_t": parts[2],
+                        "allowed_t": parts[3] if len(parts) > 3 else None
+                    })
 
-        # =========================
-        # 8) ÚTVONAL SZAKASZOK + KM-SZELVÉNYEK
-        # Szakaszok: M1, M5, M43...
-        # Km: "M1 km 23+500" jelleg
-        # =========================
-        routes = sorted(set(re.findall(r"\bM\d+\b", text)))
-        km_sections = [{"road": r1, "km": km} for (r1, km) in re.findall(r"\b(M\d+)\s*km\s*(\d+\+\d+)\b", text, flags=re.IGNORECASE)]
+                elif re.match(r"(VV|EE)", line):
+                    p = clean(line).split(" ")
+                    axle_group_totals[p[0]] = p[1]
 
-        # =========================
-        # VÁLASZ
-        # =========================
+                elif line.strip() == "":
+                    break
+
         return jsonify({
-            "permit_number": permit_number,
-            "issue_date": issue_date,
+            "permit_number": permit_number.group(1) if permit_number else None,
+            "issue_date": issue_date.group(1) if issue_date else None,
             "from_place": from_place,
             "to_place": to_place,
             "license_plate": license_plate,
-            "axle_count": axle_count,
-            "weight_t": weight,
-            "axles": axles,
-            "axle_groups": axle_groups,
-            "routes": routes,
-            "km_sections": km_sections,
+            "axles": axle_rows,
+            "axle_groups": axle_group_totals,
+            "axle_count": len(axle_rows),
             "raw_text_preview": text[:2000]
         })
 
@@ -140,6 +96,6 @@ def upload_pdf():
         return jsonify({"error": str(e)}), 500
 
 
-if name == "main":
+if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
