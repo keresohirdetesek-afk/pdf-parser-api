@@ -120,6 +120,22 @@ def upload_pdf():
         "AXLE_RAW": axle_block
     })
 
+
+<button
+  onClick={saveData}
+  className="px-4 py-2 bg-green-600 text-white rounded"
+>
+  Mentés
+</button>
+
+
+
+
+
+
+
+
+
 @app.route("/confirm", methods=["POST"])
 def confirm():
     """
