@@ -4,3 +4,8 @@ pdfplumber
 sqlalchemy
 psycopg2-binary
 pymysql
+flask
+flask-cors
+pdfplumber
+reportlab
+
