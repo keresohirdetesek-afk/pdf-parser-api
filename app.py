@@ -9,7 +9,11 @@ CORS(app)
 
 @app.route("/", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "version": "v2-raw-blocks"})
+    return jsonify({
+        "status": "ok",
+        "version": "v2-raw-blocks + permit"
+    })
+
 
 @app.route("/upload", methods=["POST"])
 def upload_pdf():
@@ -22,9 +26,9 @@ def upload_pdf():
     route_block = []
     axle_block = []
 
+    # --- PDF beolvasás ---
     with pdfplumber.open(io.BytesIO(file.read())) as pdf:
         pages_text = []
-
         for page in pdf.pages:
             try:
                 t = page.extract_text(layout=True) or ""
@@ -60,8 +64,16 @@ def upload_pdf():
         if capture and len(axle_block) >= 120:
             break
 
+    # ===== 4️⃣ ENGEDÉLYSZÁM (EGYSZERŰ, STABIL) =====
+    permit_number = None
+    for line in header_block:
+        if "UE-" in line and "/" in line:
+            permit_number = line
+            break
+
     return jsonify({
-        "VERSION": "v2-raw-blocks",
+        "VERSION": "v2-raw-blocks + permit",
+        "permit_number": permit_number,
         "HEADER_RAW": header_block,
         "ROUTE_RAW": route_block,
         "AXLE_RAW": axle_block
