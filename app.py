@@ -172,3 +172,15 @@ def confirm():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
+
+
+
+function saveData() {
+  fetch("https://web-production-pilot.up.railway.app/confirm", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      data: truckData
+    })
+  });
+}
