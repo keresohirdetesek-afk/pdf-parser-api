@@ -5,30 +5,24 @@ import io
 import re
 import os
 
+APP_VERSION = "2026-01-16-STRUCTURED-PARSER"
+
 app = Flask(__name__)
 CORS(app)
 
-
 def clean(text):
-    return re.sub(r"\s+", " ", text).strip()
+    return re.sub(r"\s+", " ", text).strip() if text else None
 
-
-def find_after(label_regex, text):
-    """
-    Megkeresi a címkét, és a KÖVETKEZŐ sort adja vissza
-    """
-    lines = text.splitlines()
-    for i, line in enumerate(lines):
-        if re.search(label_regex, line, re.IGNORECASE):
-            if i + 1 < len(lines):
-                return clean(lines[i + 1])
-    return None
-
+def find(pattern, text, flags=re.IGNORECASE):
+    m = re.search(pattern, text, flags)
+    return clean(m.group(1)) if m else None
 
 @app.route("/", methods=["GET"])
 def health():
-    return jsonify({"status": "ok"})
-
+    return jsonify({
+        "status": "ok",
+        "version": APP_VERSION
+    })
 
 @app.route("/upload", methods=["POST"])
 def upload_pdf():
@@ -39,56 +33,101 @@ def upload_pdf():
 
     try:
         with pdfplumber.open(io.BytesIO(file.read())) as pdf:
-            text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+            pages = [page.extract_text() or "" for page in pdf.pages]
+            text = "\n".join(pages)
 
-        # ===== ALAP ADATOK =====
+        # =========================
+        # ALAP ADATOK
+        # =========================
 
-        permit_number = re.search(r"(UE-[A-Z]-\d+/\d{4})", text)
-        issue_date = re.search(r"(\d{4}\.\s*\d{2}\.\s*\d{2})", text)
+        permit_number = find(r"(UE-[A-Z]-\d+/\d{4})", text)
+        issue_date = find(r"(\d{4}\.\s?\d{2}\.\s?\d{2})", text)
 
-        from_place = find_after(r"10\.\s*Kiindulás", text)
-        to_place = find_after(r"12\.\s*Célállomás", text)
+        # =========================
+        # INDULÁS / CÉL – SORSZÁM ALAPÚ
+        # =========================
 
-        # ===== RENDSZÁMOK =====
-        plates = re.findall(r"\b[A-Z]{3}\d{3}\s?[A-Z]\b", text)
-        license_plate = ", ".join(sorted(set(plates))) if plates else None
+        from_place = find(
+            r"10\.\s*Kiindulás\s*\(helységnév.*?\)\s*\n[^\n]*\n([A-Za-zÁÉÍÓÖŐÚÜŰáéíóöőúüű ,\-()]+)",
+            text
+        )
 
-        # ===== TENGELYADATOK =====
-        axle_rows = []
-        axle_group_totals = {}
+        to_place = find(
+            r"12\.\s*Célállomás\s*\(helységnév.*?\)\s*\n[^\n]*\n([A-Za-zÁÉÍÓÖŐÚÜŰáéíóöőúüű ,\-()]+)",
+            text
+        )
 
-        axle_section = False
-        for line in text.splitlines():
-            if "25. Tengelyadatok" in line:
-                axle_section = True
-                continue
+        # =========================
+        # RENDSZÁMOK (TÖBB IS)
+        # =========================
 
-            if axle_section:
-                if re.match(r"\d+\s+[AVE]", line):
-                    parts = clean(line).split(" ")
-                    axle_rows.append({
-                        "axle_no": parts[0],
-                        "type": parts[1],
-                        "requested_t": parts[2],
-                        "allowed_t": parts[3] if len(parts) > 3 else None
-                    })
+        license_plates = list(set(
+            re.findall(r"\b[A-Z]{2,3}\d{2,3}[A-Z]{2,3}\b", text)
+        ))
 
-                elif re.match(r"(VV|EE)", line):
-                    p = clean(line).split(" ")
-                    axle_group_totals[p[0]] = p[1]
+        # =========================
+        # TENGELYEK – EGYENKÉNT
+        # =========================
 
-                elif line.strip() == "":
-                    break
+        axle_lines = re.findall(
+            r"^\s*(\d+)\s+([AEV])\s+(X\s+)?([\d,]+)",
+            text,
+            re.MULTILINE
+        )
+
+        axles = []
+        for idx, typ, driven, weight in axle_lines:
+            axles.append({
+                "index": int(idx),
+                "type": typ,
+                "driven": bool(driven),
+                "load_t": float(weight.replace(",", "."))
+            })
+
+        # =========================
+        # TENGELYCSOPORTOK (VV, EE)
+        # =========================
+
+        axle_groups = []
+        for code in ["VV", "EE"]:
+            m = re.search(rf"{code}\s+([\d,]+)", text)
+            if m:
+                axle_groups.append({
+                    "group": code,
+                    "load_t": float(m.group(1).replace(",", "."))
+                })
+
+        # =========================
+        # TENGELYSZÁM
+        # =========================
+
+        axle_count = len(axles)
+
+        # =========================
+        # ÚTVONAL / KM SZÖVEG
+        # =========================
+
+        route_text = find(
+            r"Útvonalengedély.*?\n(.+?)(?:\n\d+\.)",
+            text,
+            re.DOTALL
+        )
+
+        # =========================
+        # VÁLASZ
+        # =========================
 
         return jsonify({
-            "permit_number": permit_number.group(1) if permit_number else None,
-            "issue_date": issue_date.group(1) if issue_date else None,
+            "version": APP_VERSION,
+            "permit_number": permit_number,
+            "issue_date": issue_date,
             "from_place": from_place,
             "to_place": to_place,
-            "license_plate": license_plate,
-            "axles": axle_rows,
-            "axle_groups": axle_group_totals,
-            "axle_count": len(axle_rows),
+            "license_plates": license_plates,
+            "axle_count": axle_count,
+            "axles": axles,
+            "axle_groups": axle_groups,
+            "route_text": route_text,
             "raw_text_preview": text[:2000]
         })
 
